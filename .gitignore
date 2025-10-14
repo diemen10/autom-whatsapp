@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Env and secrets
+.env
+.env.*
+
+# Vercel local files
+.vercel
+.vercel_build_output/
+
+# Logs
+npm-debug.log*
+yarn-error.log*
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
