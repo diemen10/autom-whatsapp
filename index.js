@@ -54,6 +54,93 @@ async function generateAiReply({ userText, from, history = [] }) {
   }
 }
 
+// OpenAI Assistants: gestiona un thread por número y ejecuta un run
+async function ensureAssistantThread({ from }) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return null;
+  const kvKey = `wa:${from}:thread`;
+  try {
+    const existing = await kv.get(kvKey);
+    if (existing && typeof existing === 'string') return existing;
+  } catch {}
+  try {
+    const { data } = await axios.post(
+      'https://api.openai.com/v1/threads',
+      {},
+      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+    );
+    const threadId = data?.id;
+    if (threadId) {
+      await kv.set(kvKey, threadId, { ex: 60 * 60 * 24 * 30 });
+      return threadId;
+    }
+  } catch (e) {
+    console.error('[assistants] create thread error', e?.response?.data || e.message);
+  }
+  return null;
+}
+
+async function generateAssistantReply({ from, userText }) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  const assistantId = process.env.OPENAI_ASSISTANT_ID;
+  if (!apiKey || !assistantId) return null;
+
+  try {
+    const threadId = await ensureAssistantThread({ from });
+    if (!threadId) return null;
+
+    // Add user message to thread
+    await axios.post(
+      `https://api.openai.com/v1/threads/${threadId}/messages`,
+      { role: 'user', content: userText },
+      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+    );
+
+    // Create a run
+    const runResp = await axios.post(
+      `https://api.openai.com/v1/threads/${threadId}/runs`,
+      { assistant_id: assistantId },
+      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+    );
+    const runId = runResp?.data?.id;
+    if (!runId) return null;
+
+    // Poll run status up to ~12s
+    const started = Date.now();
+    const deadline = started + 12000;
+    let status = runResp?.data?.status;
+    while (Date.now() < deadline && status && status !== 'completed' && status !== 'failed' && status !== 'cancelled' && status !== 'expired') {
+      await new Promise(r => setTimeout(r, 1000));
+      try {
+        const { data: run } = await axios.get(
+          `https://api.openai.com/v1/threads/${threadId}/runs/${runId}`,
+          { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 8000 }
+        );
+        status = run?.status;
+      } catch (e) {
+        console.warn('[assistants] poll error', e?.response?.data || e.message);
+        break;
+      }
+    }
+
+    if (status !== 'completed') return null;
+
+    // Fetch latest assistant message
+    const { data: msgs } = await axios.get(
+      `https://api.openai.com/v1/threads/${threadId}/messages?limit=1&order=desc`,
+      { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 8000 }
+    );
+    const latest = msgs?.data?.[0];
+    const parts = latest?.content || [];
+    const textPart = parts.find(p => p?.type === 'text');
+    const value = textPart?.text?.value?.trim();
+    return value || null;
+  } catch (e) {
+    console.error('[assistants] error', e?.response?.data || e.message);
+    return null;
+  }
+}
+
 async function sendWhatsAppViaTwilio({ to, body }) {
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
   const authToken = process.env.TWILIO_AUTH_TOKEN;
@@ -175,7 +262,14 @@ export default async function handler(req, res) {
 
   const MAX_MSGS = 20; // últimos 10 turnos (user+assistant)
   const limitedHistory = history.slice(-MAX_MSGS);
-  const aiReply = await generateAiReply({ userText: text, from, history: limitedHistory });
+  // Si hay OPENAI_ASSISTANT_ID, usar Assistants; si no, chat completions
+  let aiReply = null;
+  if (process.env.OPENAI_ASSISTANT_ID) {
+    aiReply = await generateAssistantReply({ from, userText: text });
+  }
+  if (!aiReply) {
+    aiReply = await generateAiReply({ userText: text, from, history: limitedHistory });
+  }
 
   // Guardar nuevo historial (recortando y con TTL)
   if (kvKey) {
