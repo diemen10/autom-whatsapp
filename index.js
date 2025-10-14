@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import axios from "axios";
+import { kv } from "@vercel/kv";
 
 function escapeXml(str = "") {
   return String(str)
@@ -10,7 +11,7 @@ function escapeXml(str = "") {
     .replace(/'/g, "&apos;");
 }
 
-async function generateAiReply({ userText, from }) {
+async function generateAiReply({ userText, from, history = [] }) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     console.warn("OPENAI_API_KEY no configurada; usando fallback");
@@ -18,16 +19,17 @@ async function generateAiReply({ userText, from }) {
   }
 
   try {
+    const system = {
+      role: "system",
+      content:
+        "Eres un agente de atención al cliente por WhatsApp para una empresa. Responde en español, con tono cercano, breve y profesional. Consigue la información esencial (nombre, necesidad, presupuesto, ubicación, horario). Si el usuario pregunta por productos/servicios o precios, pide contexto. No uses listas largas ni markdown; mantén respuestas concisas. Si no hay suficiente contexto, haz 1-2 preguntas claras.",
+    };
+
+    const messages = [system, ...history, { role: "user", content: `Mensaje del cliente (${from}): ${userText}` }];
+
     const payload = {
       model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content:
-            "Eres un agente de atención al cliente por WhatsApp para una empresa. Responde en español, con tono cercano, breve y profesional. Consigue la información esencial (nombre, necesidad, presupuesto, ubicación, horario). Si el usuario pregunta por productos/servicios o precios, pide contexto para poder recomendar. No uses listas largas ni formato markdown; mantén respuestas concisas. Si no hay suficiente contexto, haz 1-2 preguntas claras.",
-        },
-        { role: "user", content: `Mensaje del cliente (${from}): ${userText}` },
-      ],
+      messages,
       temperature: 0.6,
       max_tokens: 220,
     };
@@ -124,6 +126,20 @@ export default async function handler(req, res) {
   console.log("[twilio] from:", body.From, "parsed:", from);
   console.log("[twilio] text length:", text.length);
 
+  // Cargar historial (memoria) desde Vercel KV
+  const kvKey = from ? `wa:${from}` : null;
+  let history = [];
+  if (kvKey) {
+    try {
+      const stored = await kv.get(kvKey);
+      if (Array.isArray(stored)) {
+        history = stored.filter(m => m && typeof m.role === 'string' && typeof m.content === 'string');
+      }
+    } catch (e) {
+      console.warn("[kv] get error:", e?.message || e);
+    }
+  }
+
   const attributes = {
     SOURCE: "WhatsApp",
     FIRST_MSG: text,
@@ -157,11 +173,22 @@ export default async function handler(req, res) {
     console.error("[brevo] error de red", e?.response?.data || e.message);
   }
 
-  const aiReply = await generateAiReply({ userText: text, from });
+  const MAX_MSGS = 20; // últimos 10 turnos (user+assistant)
+  const limitedHistory = history.slice(-MAX_MSGS);
+  const aiReply = await generateAiReply({ userText: text, from, history: limitedHistory });
+
+  // Guardar nuevo historial (recortando y con TTL)
+  if (kvKey) {
+    try {
+      const updated = [...limitedHistory, { role: 'user', content: text }, { role: 'assistant', content: aiReply }].slice(-MAX_MSGS);
+      await kv.set(kvKey, updated, { ex: 60 * 60 * 24 * 30 }); // 30 días
+    } catch (e) {
+      console.warn("[kv] set error:", e?.message || e);
+    }
+  }
   const sentViaRest = await sendWhatsAppViaTwilio({ to: from, body: aiReply });
   if (sentViaRest) { res.status(200).send("OK"); return; }
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Message>${escapeXml(aiReply)}</Message></Response>`;
   res.setHeader("Content-Type", "text/xml");
   res.status(200).send(twiml);
 }
-
