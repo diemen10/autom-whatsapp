@@ -67,7 +67,7 @@ async function ensureAssistantThread({ from }) {
     const { data } = await axios.post(
       'https://api.openai.com/v1/threads',
       {},
-      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'OpenAI-Beta': 'assistants=v2' }, timeout: 10000 }
     );
     const threadId = data?.id;
     if (threadId) {
@@ -93,14 +93,14 @@ async function generateAssistantReply({ from, userText }) {
     await axios.post(
       `https://api.openai.com/v1/threads/${threadId}/messages`,
       { role: 'user', content: userText },
-      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'OpenAI-Beta': 'assistants=v2' }, timeout: 10000 }
     );
 
     // Create a run
     const runResp = await axios.post(
       `https://api.openai.com/v1/threads/${threadId}/runs`,
       { assistant_id: assistantId },
-      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'OpenAI-Beta': 'assistants=v2' }, timeout: 10000 }
     );
     const runId = runResp?.data?.id;
     if (!runId) return null;
@@ -114,7 +114,7 @@ async function generateAssistantReply({ from, userText }) {
       try {
         const { data: run } = await axios.get(
           `https://api.openai.com/v1/threads/${threadId}/runs/${runId}`,
-          { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 8000 }
+          { headers: { Authorization: `Bearer ${apiKey}`, 'OpenAI-Beta': 'assistants=v2' }, timeout: 8000 }
         );
         status = run?.status;
       } catch (e) {
@@ -128,7 +128,7 @@ async function generateAssistantReply({ from, userText }) {
     // Fetch latest assistant message
     const { data: msgs } = await axios.get(
       `https://api.openai.com/v1/threads/${threadId}/messages?limit=1&order=desc`,
-      { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 8000 }
+      { headers: { Authorization: `Bearer ${apiKey}`, 'OpenAI-Beta': 'assistants=v2' }, timeout: 8000 }
     );
     const latest = msgs?.data?.[0];
     const parts = latest?.content || [];
@@ -199,6 +199,10 @@ function parseFormUrlEncoded(str) {
 }
 
 export default async function handler(req, res) {
+  if (req.method === "GET") {
+    res.status(200).send("OK");
+    return;
+  }
   if (req.method !== "POST") {
     res.status(405).send("Method Not Allowed");
     return;
