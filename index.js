@@ -1,7 +1,6 @@
 import 'dotenv/config';
 import axios from "axios";
 
-// Utilidad simple para escapar el XML de TwiML
 function escapeXml(str = "") {
   return String(str)
     .replace(/&/g, "&amp;")
@@ -11,11 +10,10 @@ function escapeXml(str = "") {
     .replace(/'/g, "&apos;");
 }
 
-// Genera una respuesta con IA usando OpenAI (vía HTTP con axios)
 async function generateAiReply({ userText, from }) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    console.warn("OPENAI_API_KEY no configurada; devolviendo respuesta por defecto");
+    console.warn("OPENAI_API_KEY no configurada; usando fallback");
     return "¡Gracias por escribirnos! ¿En qué puedo ayudarte hoy?";
   }
 
@@ -28,10 +26,7 @@ async function generateAiReply({ userText, from }) {
           content:
             "Eres un agente de atención al cliente por WhatsApp para una empresa. Responde en español, con tono cercano, breve y profesional. Consigue la información esencial (nombre, necesidad, presupuesto, ubicación, horario). Si el usuario pregunta por productos/servicios o precios, pide contexto para poder recomendar. No uses listas largas ni formato markdown; mantén respuestas concisas. Si no hay suficiente contexto, haz 1-2 preguntas claras.",
         },
-        {
-          role: "user",
-          content: `Mensaje del cliente (${from}): ${userText}`,
-        },
+        { role: "user", content: `Mensaje del cliente (${from}): ${userText}` },
       ],
       temperature: 0.6,
       max_tokens: 220,
@@ -52,17 +47,16 @@ async function generateAiReply({ userText, from }) {
     const reply = data?.choices?.[0]?.message?.content?.trim();
     return reply || "¡Gracias por escribirnos! ¿En qué puedo ayudarte hoy?";
   } catch (err) {
-    console.error("Error al generar respuesta con OpenAI:", err?.response?.data || err.message);
+    console.error("[ai] error:", err?.response?.data || err.message);
     return "Gracias por tu mensaje. En breve un asesor humano te responde.";
   }
 }
 
-// Envía un WhatsApp vía API REST de Twilio (opcional)
 async function sendWhatsAppViaTwilio({ to, body }) {
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
   const authToken = process.env.TWILIO_AUTH_TOKEN;
-  const fromNumber = process.env.TWILIO_WHATSAPP_FROM; // ej. whatsapp:+14155238886 o +1415...
-  const messagingServiceSid = process.env.TWILIO_MESSAGING_SERVICE_SID; // opcional
+  const fromNumber = process.env.TWILIO_WHATSAPP_FROM;
+  const messagingServiceSid = process.env.TWILIO_MESSAGING_SERVICE_SID;
 
   if (!accountSid || !authToken || (!fromNumber && !messagingServiceSid)) {
     return false;
@@ -80,11 +74,8 @@ async function sendWhatsAppViaTwilio({ to, body }) {
     const form = new URLSearchParams();
     form.append("To", toWa);
     form.append("Body", body);
-    if (messagingServiceSid) {
-      form.append("MessagingServiceSid", messagingServiceSid);
-    } else if (fromWa) {
-      form.append("From", fromWa);
-    }
+    if (messagingServiceSid) form.append("MessagingServiceSid", messagingServiceSid);
+    else if (fromWa) form.append("From", fromWa);
 
     const resp = await axios.post(url, form.toString(), {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -94,15 +85,14 @@ async function sendWhatsAppViaTwilio({ to, body }) {
     });
 
     if (resp.status >= 200 && resp.status < 300) return true;
-    console.error("Twilio REST devolvió estado:", resp.status, resp.data);
+    console.error("[twilio] REST status:", resp.status, resp.data);
     return false;
   } catch (err) {
-    console.error("Error enviando por Twilio REST:", err?.response?.data || err.message);
+    console.error("[twilio] REST error:", err?.response?.data || err.message);
     return false;
   }
 }
 
-/** Lee el raw body del request (necesario porque Twilio manda x-www-form-urlencoded) */
 async function readRawBody(req) {
   return await new Promise((resolve, reject) => {
     let data = "";
@@ -112,7 +102,6 @@ async function readRawBody(req) {
   });
 }
 
-/** Convierte x-www-form-urlencoded → objeto JS */
 function parseFormUrlEncoded(str) {
   const params = new URLSearchParams(str);
   const obj = {};
@@ -121,51 +110,53 @@ function parseFormUrlEncoded(str) {
 }
 
 export default async function handler(req, res) {
-  // Solo aceptar POST (Twilio enviará POST)
   if (req.method !== "POST") {
     res.status(405).send("Method Not Allowed");
     return;
   }
 
-  // 1️⃣ Leer el cuerpo del mensaje
   const raw = await readRawBody(req);
   const body = parseFormUrlEncoded(raw);
 
-  // 2️⃣ Extraer info relevante
-  const from = (body.From || "").replace("whatsapp:", ""); // +34123456789
+  const from = (body.From || "").replace(/^whatsapp:/i, "").trim();
   const text = (body.Body || "").trim();
 
-  console.log("📩 Nuevo mensaje entrante desde WhatsApp:", from, "→", text);
+  console.log("[twilio] from:", body.From, "parsed:", from);
+  console.log("[twilio] text length:", text.length);
 
-  // 3️⃣ Crear payload para Brevo
+  const attributes = {
+    SOURCE: "WhatsApp",
+    FIRST_MSG: text,
+    WHATSAPP_OPTIN: true,
+  };
+
   const payload = {
     sms: from,
-    attributes: {
-      SOURCE: "WhatsApp",
-      FIRST_MSG: text,
-      WHATSAPP_OPTIN: true,
-    },
+    attributes,
     updateEnabled: true,
   };
 
   const listId = process.env.BREVO_LIST_ID;
-  if (listId) payload.listIds = [Number(listId)];
-
-  // 4️⃣ Enviar a Brevo
-  try {
-    await axios.post("https://api.brevo.com/v3/contacts", payload, {
-      headers: {
-        "api-key": process.env.BREVO_API_KEY,
-        "Content-Type": "application/json",
-      },
-      timeout: 10000,
-    });
-    console.log("✅ Contacto creado/actualizado en Brevo:", from);
-  } catch (e) {
-    console.error("❌ Error enviando a Brevo:", e?.response?.data || e.message);
+  if (listId) {
+    const n = Number(listId);
+    if (Number.isFinite(n)) payload.listIds = [n];
+    else console.warn("[config] BREVO_LIST_ID no es numérico:", listId);
   }
 
-  // 5️⃣ Responder a Twilio
+  try {
+    console.log("[brevo] sending payload has sms?", Boolean(payload.sms), payload.sms);
+    const response = await axios.post(
+      "https://api.brevo.com/v3/contacts",
+      payload,
+      { headers: { "api-key": process.env.BREVO_API_KEY, "Content-Type": "application/json" }, timeout: 10000, validateStatus: () => true }
+    );
+    console.log("[brevo] status:", response.status);
+    if (response.status >= 200 && response.status < 300) console.log("[brevo] ok");
+    else console.error("[brevo] error", response.data);
+  } catch (e) {
+    console.error("[brevo] error de red", e?.response?.data || e.message);
+  }
+
   const aiReply = await generateAiReply({ userText: text, from });
   const sentViaRest = await sendWhatsAppViaTwilio({ to: from, body: aiReply });
   if (sentViaRest) { res.status(200).send("OK"); return; }
@@ -173,3 +164,4 @@ export default async function handler(req, res) {
   res.setHeader("Content-Type", "text/xml");
   res.status(200).send(twiml);
 }
+
