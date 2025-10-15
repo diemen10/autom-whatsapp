@@ -236,6 +236,9 @@ export default async function handler(req, res) {
     FIRST_MSG: text,
     WHATSAPP_OPTIN: true,
   };
+  if (from) {
+    attributes.SMS = from;
+  }
 
   const payload = {
     sms: from,
@@ -264,11 +267,18 @@ export default async function handler(req, res) {
     console.error("[brevo] error de red", e?.response?.data || e.message);
   }
 
+  const assistantId = process.env.OPENAI_ASSISTANT_ID;
+  if (assistantId) {
+    console.log("[config] assistant id detected", `${assistantId.slice(0, 12)}…`);
+  } else {
+    console.warn("[config] OPENAI_ASSISTANT_ID no definido");
+  }
+
   const MAX_MSGS = 20; // últimos 10 turnos (user+assistant)
   const limitedHistory = history.slice(-MAX_MSGS);
   // Si hay OPENAI_ASSISTANT_ID, usar Assistants; si no, chat completions
   let aiReply = null;
-  if (process.env.OPENAI_ASSISTANT_ID) {
+  if (assistantId) {
     aiReply = await generateAssistantReply({ from, userText: text });
   }
   if (!aiReply) {
